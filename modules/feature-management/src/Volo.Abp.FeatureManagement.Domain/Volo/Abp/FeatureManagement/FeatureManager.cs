@@ -7,6 +7,7 @@ using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
 using Volo.Abp.DependencyInjection;
 using Volo.Abp.Features;
+using Volo.Abp.MultiTenancy;
 
 namespace Volo.Abp.FeatureManagement;
 
@@ -15,6 +16,8 @@ public class FeatureManager : IFeatureManager, ISingletonDependency
     protected IFeatureDefinitionManager FeatureDefinitionManager { get; }
     protected List<IFeatureManagementProvider> Providers => _lazyProviders.Value;
     protected FeatureManagementOptions Options { get; }
+    
+    protected ICurrentTenant CurrentTenant { get; }
     protected IStringLocalizerFactory StringLocalizerFactory { get; }
 
     private readonly Lazy<List<IFeatureManagementProvider>> _lazyProviders;
@@ -23,10 +26,12 @@ public class FeatureManager : IFeatureManager, ISingletonDependency
         IOptions<FeatureManagementOptions> options,
         IServiceProvider serviceProvider,
         IFeatureDefinitionManager featureDefinitionManager,
-        IStringLocalizerFactory stringLocalizerFactory)
+        IStringLocalizerFactory stringLocalizerFactory, 
+        ICurrentTenant currentTenant)
     {
         FeatureDefinitionManager = featureDefinitionManager;
         StringLocalizerFactory = stringLocalizerFactory;
+        CurrentTenant = currentTenant;
         Options = options.Value;
 
         //TODO: Instead, use IHybridServiceScopeFactory and create a scope..?
@@ -129,50 +134,55 @@ public class FeatureManager : IFeatureManager, ISingletonDependency
     {
         Check.NotNull(name, nameof(name));
         Check.NotNull(providerName, nameof(providerName));
-
-        var feature = FeatureDefinitionManager.Get(name);
-
-        if (feature?.ValueType?.Validator.IsValid(value) == false)
+        
+        using (providerName == TenantFeatureValueProvider.ProviderName && providerKey != null
+                   ? CurrentTenant.Change(Guid.Parse(providerKey))
+                   : NullDisposable.Instance)
         {
-            throw new FeatureValueInvalidException(feature.DisplayName.Localize(StringLocalizerFactory));
-        }
+            var feature = FeatureDefinitionManager.Get(name);
 
-        var providers = Enumerable
-            .Reverse(Providers)
-            .SkipWhile(p => p.Name != providerName)
-            .ToList();
-
-        if (!providers.Any())
-        {
-            return;
-        }
-
-        if (providers.Count > 1 && !forceToSet && value != null)
-        {
-            var fallbackValue = await GetOrNullInternalAsync(name, providers[1].Name, null);
-            if (fallbackValue.Value == value)
+            if (feature?.ValueType?.Validator.IsValid(value) == false)
             {
-                //Clear the value if it's same as it's fallback value
-                value = null;
+                throw new FeatureValueInvalidException(feature.DisplayName.Localize(StringLocalizerFactory));
             }
-        }
 
-        providers = providers
-            .TakeWhile(p => p.Name == providerName)
-            .ToList(); //Getting list for case of there are more than one provider with same providerName
+            var providers = Enumerable
+                .Reverse(Providers)
+                .SkipWhile(p => p.Name != providerName)
+                .ToList();
 
-        if (value == null)
-        {
-            foreach (var provider in providers)
+            if (!providers.Any())
             {
-                await provider.ClearAsync(feature, providerKey);
+                return;
             }
-        }
-        else
-        {
-            foreach (var provider in providers)
+
+            if (providers.Count > 1 && !forceToSet && value != null)
             {
-                await provider.SetAsync(feature, value, providerKey);
+                var fallbackValue = await GetOrNullInternalAsync(name, providers[1].Name, null);
+                if (fallbackValue.Value == value)
+                {
+                    //Clear the value if it's same as it's fallback value
+                    value = null;
+                }
+            }
+
+            providers = providers
+                .TakeWhile(p => p.Name == providerName)
+                .ToList(); //Getting list for case of there are more than one provider with same providerName
+
+            if (value == null)
+            {
+                foreach (var provider in providers)
+                {
+                    await provider.ClearAsync(feature, providerKey);
+                }
+            }
+            else
+            {
+                foreach (var provider in providers)
+                {
+                    await provider.SetAsync(feature, value, providerKey);
+                }
             }
         }
     }
